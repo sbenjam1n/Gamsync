@@ -54,6 +54,7 @@ func init() {
 	rootCmd.AddCommand(queueCmd)
 	rootCmd.AddCommand(memorizerCmd)
 	rootCmd.AddCommand(runCmd)
+	rootCmd.AddCommand(skillCmd)
 }
 
 func initConfig() {
