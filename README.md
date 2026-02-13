@@ -2,7 +2,7 @@
 
 Agentic Memory with Concept Design, Synchronizations, and Structural Enforcement.
 
-GAM+Sync is a CLI tool (`gam`) for managing agentic software development. It provides concepts (independent units of functionality), synchronizations (declarative inter-concept rules), region markers (structural namespace enforcement), and a validation pipeline — so autonomous coding agents can work reliably on large codebases.
+GAM+Sync is a CLI tool (`gam`) for managing agentic and human-in-the-loop software development. It provides concepts (independent units of functionality), synchronizations (declarative inter-concept rules), region markers (structural namespace enforcement), and a validation pipeline — so coding agents can work reliably on large codebases.
 
 Three failures compound in LLM-driven software development.
 
