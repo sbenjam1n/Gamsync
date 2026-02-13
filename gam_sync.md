@@ -18,31 +18,17 @@ Three failures compound in LLM-driven software development.
 
 These three failures share a structural root. The software lacks modularity that corresponds to functionality, lacks a compositional layer that makes inter-module behavior explicit, and lacks enforcement infrastructure that prevents autonomous agents from violating module boundaries.
 
-## 2. Four Sources, One System
+## 2. Four Approaches
 
-GAM+Sync synthesizes four bodies of work that each solve a different face of this problem.
+GAM+Sync synthesizes four approaches that each solve a different face of this problem.
 
-**Hierarchical Region Markers (HRM)** contributed the insight that agents orient themselves through a structured architecture document — a namespace skeleton that fits in a context window and tells the agent what exists, where it lives, and what boundaries to respect. The turn memory pattern (a scratchpad field that bridges context windows) is the cheapest effective mechanism for cross-session continuity. Region markers in source files (comments that tag code with namespace paths) create a uniform structural layer across any language and enable automated tree-view generation of code structure.
+GAM+Sync uses a skeletal architecture file (arch.md) that agents use for orientation, region markers in source code that tag files with namespace paths, a two-command turn ritual (start/end) with a scratchpad turn memory field for cross-session continuity, and the principle that enforcement lives in tool commands rather than agent-remembered rules.
 
-What survived from HRM: the skeleton architecture file (arch.md), the two-command turn ritual (start/end), region markers in code, the scratchpad turn memory mechanism, and the principle that enforcement happens in tool commands rather than in rules agents must remember.
+Concept Design and Synchronizations (Meng & Jackson, Onward! 2025) contributed the design methodology where concepts are independent services with purpose, state, typed actions, and operational principles. The synchronization language (when/where/then) declaratively connects concepts without creating dependencies. What survived: concept specifications, the synchronization engine with flow tokens for causal tracking, spec-first generation, and provenance-based debugging via sync attribution. Dropped elements—RDF/SPARQL storage, the Web bootstrap concept, and Turtle-format action records—were replaced by PostgreSQL JSONB, a CLI entry point, and a flow_log table.
 
-What was dropped: six parallel aspect files (TEST.hrm, DOC.hrm, SEC.hrm, SCENE.hrm, REFLECTION.hrm), cross-aspect turn synchronization, phase transition commands, metadata envelopes, computed metadata scripts. These became database fields, lifecycle hooks, and automated validations.
+GAM+Sync adopts enforcement infrastructure: a dual-agent architecture (Memorizer auditor, Researcher coder), proposals as structured change requests with typed transitions, and tiered validation (four tiers) with advisory locking on LTREE paths. What survived includes correction briefings with typed error codes, Redis streams for inter-role queuing, and LTREE storage with ancestor-based invariant inheritance.
 
-**Concept Design and Synchronizations (Meng & Jackson, Onward! 2025)** contributed the design methodology. Concepts are fully independent services, each with a well-defined purpose, its own state machine, named actions with typed signatures, and an operational principle that describes the archetypal scenario fulfilling the concept's purpose. Synchronizations are small declarative rules — when these actions happen under these conditions, invoke these other actions — that express all inter-concept behavior without creating dependencies between concepts. The synchronization engine produces action traces with flow tokens and sync attribution as a natural byproduct, enabling provenance-based debugging.
-
-What survived: concept specifications (purpose, state, actions, operational principles), the synchronization language (when/where/then), flow tokens for causal tracking, spec-first generation (generate specs before code, generate syncs from specs without seeing code), provenance tracking with sync attribution.
-
-What was dropped: RDF/SPARQL storage (PostgreSQL with JSONB is sufficient), the Web bootstrap concept (replaced by the CLI entry point), Turtle-format action records (flow_log table serves the same purpose).
-
-**General Agentic Memory (GAM+MIT)** contributed the enforcement infrastructure. The dual-agent architecture (Memorizer as auditor, Researcher as coder), proposals as structured change requests with typed transitions and evidence, tiered validation (fast gate through integration tests through LLM audit), advisory locking for concurrent agents, LTREE hierarchical regions with ancestor-based invariant inheritance, and typed rejection with correction briefings.
-
-What survived: proposals as structured change requests, tiered validation (four tiers), advisory locks on LTREE paths, correction briefings with typed error codes, the Memorizer/Researcher execution model (adapted for flexible single-model or multi-model operation), Redis streams for durable inter-role queuing, LTREE storage with ancestor resolution.
-
-What was dropped: WASM compilation (pure Go validator for MVP), hot/cold proposal archiving (premature optimization for MVP).
-
-**Harness Engineering (OpenAI, 2026)** contributed operational validation at scale. A team of three engineers (later seven) shipped a million-line-of-code product over five months with zero manually-written code, averaging 3.5 PRs per engineer per day. The key lessons that shaped GAM+Sync: treat the architecture document as a table of contents, not an encyclopedia (~100 lines pointing to deeper sources, not a monolithic manual). Make all knowledge repository-local and versioned — decisions that live in chat threads or people's heads are invisible to agents. Use progressive disclosure so agents start with a small, stable entry point and navigate to depth on demand. Enforce architecture with mechanical linters whose error messages are written as agent-actionable remediation instructions. Run recurring "gardening" agents that sweep for entropy, assess quality grades, and open targeted fix-up PRs. Replace single-pass review with iterative review loops where agents respond to feedback, revise, and resubmit. Prefer "boring" technology that is well-represented in training data, composable, and stable.
-
-What was adopted: the docs/ directory as a repo-local projection of database knowledge, execution plans as first-class multi-turn artifacts with decision logs, the Tier 3 review loop (iterative feedback instead of flat rejection), runtime validation (Tier 4, booting the app to verify behavior), the gardening agent for entropy management with quality grades and golden principles, agent-actionable rejection messages as a design property, and the technology preference for boring, well-documented tools.
+Harness Engineering (OpenAI, 2026) contributed operational learnings from shipping a million-line product with zero manually-written code. GAM+Sync adopted: the docs/ directory as repo-local knowledge, execution plans as multi-turn artifacts with decision logs, iterative Tier 3 review loops, runtime validation (Tier 4), gardening agents for entropy management with quality grades, agent-actionable rejection messages, and a preference for boring, well-documented tools well-represented in training data.
 
 ## 3. Core Abstractions
 
