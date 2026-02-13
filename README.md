@@ -4,7 +4,15 @@ Agentic Memory with Concept Design, Synchronizations, and Structural Enforcement
 
 GAM+Sync is a CLI tool (`gam`) for managing agentic software development. It provides concepts (independent units of functionality), synchronizations (declarative inter-concept rules), region markers (structural namespace enforcement), and a validation pipeline — so autonomous coding agents can work reliably on large codebases.
 
+Three failures compound in LLM-driven software development.
 
+**Context rot.** As a project grows, the agent's context window fills with irrelevant, redundant, or conflicting data. Performance degrades. The agent hallucinates structure that doesn't exist, forgets decisions made two sessions ago, and generates code that contradicts what's already there. This is not a model limitation — it's an information architecture problem. The agent has no mechanism to distinguish what matters right now from the accumulated noise of every prior session.
+
+**Illegibility.** Software lacks a direct correspondence between code and observed behavior. A change to "how users register" might require modifications across a routing module, a controller, a model, a middleware, and a test file — none of which mention "registration" in their organizational structure. When an LLM is asked to extend registration behavior, it must reconstruct this scattered mapping from code, which it does unreliably. The code is illegible not because it's poorly written but because its structure doesn't reflect its function.
+
+**Integrity failure.** LLM coding assistants break previously working functionality at rates that make incremental development unreliable. A benchmark study found that when controlled for solution leakage and false positives, LLM success rates on realistic coding tasks drop dramatically. Programmers report that patches recommended by coding assistants often break prior features, and whole-app builders hit undefined complexity ceilings. The root cause is the same: the agent cannot reason about which parts of the system are affected by a change because the boundaries between concerns are not enforced.
+
+These three failures share a structural root. The software lacks modularity that corresponds to functionality, lacks a compositional layer that makes inter-module behavior explicit, and lacks enforcement infrastructure that prevents autonomous agents from violating module boundaries.
 
 GAM+Sync synthesizes four approaches that each solve a different face of this problem.
 
