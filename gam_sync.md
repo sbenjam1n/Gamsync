@@ -28,7 +28,7 @@ Concept Design and Synchronizations (Meng & Jackson, Onward! 2025) contributed t
 
 GAM+Sync provides enforcement infrastructure: a dual-agent architecture (Memorizer auditor, Researcher coder), proposals as structured change requests with typed transitions, tiered validation (four tiers) with advisory locking on LTREE paths, correction briefings with typed error codes, Redis streams for inter-role queuing, and LTREE storage with ancestor-based invariant inheritance.
 
-Harness Engineering (OpenAI, 2026) contributed operational learnings from shipping a million-line product with zero manually-written code. GAM+Sync adopts the docs/ directory as repo-local knowledge, execution plans as multi-turn artifacts with decision logs, iterative Tier 3 review loops, runtime validation (Tier 4), gardening agents for entropy management with quality grades, agent-actionable rejection messages, and a preference for boring, well-documented tools well-represented in training data.
+OpenAi's harness engineering (Lopopolo, OpenAI 2026) contributed operational learnings from shipping a million-line product with zero manually-written code. GAM+Sync adopts the docs/ directory as repo-local knowledge, execution plans as multi-turn artifacts with decision logs, iterative Tier 3 review loops, runtime validation (Tier 4), gardening agents for entropy management with quality grades, agent-actionable rejection messages, and a preference for boring, well-documented tools well-represented in training data.
 
 ## 3. Core Abstractions
 
