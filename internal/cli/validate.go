@@ -12,11 +12,59 @@ import (
 
 var validateCmd = &cobra.Command{
 	Use:   "validate [path]",
-	Short: "Run Tier 0 + Tier 1 validation against a region or file",
+	Short: "Run validation: arch.md alignment, region markers, Tier 0 + Tier 1",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		all, _ := cmd.Flags().GetBool("all")
+		archOnly, _ := cmd.Flags().GetBool("arch")
 		ctx := context.Background()
+
+		root := projectRoot()
+
+		// Arch-only mode: validate arch.md without DB
+		if archOnly {
+			fmt.Println("Validating arch.md namespace alignment...")
+
+			issues := region.ValidateArchNamespaces(root)
+			if len(issues) > 0 {
+				fmt.Println("\nNamespace hierarchy issues:")
+				for _, issue := range issues {
+					fmt.Printf("  %s\n", issue)
+				}
+			}
+
+			// Check source vs arch.md alignment
+			archPaths, _ := region.ParseArchMd(root)
+			archSet := make(map[string]bool)
+			for _, p := range archPaths {
+				archSet[p] = true
+			}
+
+			gamignore := region.ParseGamignore(root)
+			markers, warnings, _ := region.ScanDirectory(root, gamignore)
+
+			for _, w := range warnings {
+				fmt.Printf("  Warning: %s\n", w)
+			}
+
+			sourceSet := make(map[string]bool)
+			for _, m := range markers {
+				sourceSet[m.Path] = true
+				if !archSet[m.Path] {
+					fmt.Printf("  FAIL: region %s in source (%s:%d) not in arch.md\n", m.Path, m.File, m.StartLine)
+				}
+			}
+			for _, p := range archPaths {
+				if !sourceSet[p] {
+					fmt.Printf("  WARN: arch.md declares %s but no source markers found\n", p)
+				}
+			}
+
+			if len(issues) == 0 {
+				fmt.Println("  arch.md validation passed.")
+			}
+			return nil
+		}
 
 		pool, err := connectDB(ctx)
 		if err != nil {
@@ -24,10 +72,22 @@ var validateCmd = &cobra.Command{
 		}
 		defer pool.Close()
 
-		v := validator.New(pool, projectRoot())
+		v := validator.New(pool, root)
 
 		if all {
-			// Validate all regions
+			// Full project validation
+			fmt.Println("=== arch.md alignment ===")
+			archIssues := v.ValidateArchAlignment(ctx, root)
+			archFailed := 0
+			for _, issue := range archIssues {
+				fmt.Printf("  %s\n", issue)
+				archFailed++
+			}
+			if archFailed == 0 {
+				fmt.Println("  PASSED")
+			}
+
+			fmt.Println("\n=== Tier 0 structural ===")
 			rows, err := pool.Query(ctx, `SELECT path FROM regions ORDER BY path`)
 			if err != nil {
 				return err
@@ -40,7 +100,6 @@ var validateCmd = &cobra.Command{
 				var path string
 				rows.Scan(&path)
 
-				// Create a minimal proposal for structural validation
 				proposal := &gam.Proposal{
 					RegionPath: path,
 				}
@@ -49,21 +108,26 @@ var validateCmd = &cobra.Command{
 					passed++
 				} else {
 					failed++
-					fmt.Printf("FAIL %s: %s\n", path, result.Message)
+					fmt.Printf("  FAIL %s: %s\n", path, result.Message)
 					for _, d := range result.Details {
 						if !d.Passed && d.Fix != "" {
-							fmt.Printf("  Fix: %s\n", d.Fix)
+							fmt.Printf("    Fix: %s\n", d.Fix)
 						}
 					}
 				}
 			}
 
-			fmt.Printf("\n%d passed, %d failed\n", passed, failed)
+			fmt.Printf("\n  %d passed, %d failed\n", passed, failed)
+
+			total := archFailed + failed
+			if total > 0 {
+				return fmt.Errorf("validation failed: %d total issues", total)
+			}
 			return nil
 		}
 
 		if len(args) == 0 {
-			return fmt.Errorf("specify a region path or use --all")
+			return fmt.Errorf("specify a region path, use --all, or use --arch")
 		}
 
 		regionPath := args[0]
@@ -72,8 +136,8 @@ var validateCmd = &cobra.Command{
 		fmt.Printf("Validating %s...\n", regionPath)
 
 		// Check region markers in source files
-		gamignore := region.ParseGamignore(projectRoot())
-		markers, warnings, _ := region.ScanDirectory(projectRoot(), gamignore)
+		gamignore := region.ParseGamignore(root)
+		markers, warnings, _ := region.ScanDirectory(root, gamignore)
 
 		found := false
 		for _, m := range markers {
@@ -126,4 +190,5 @@ func formatValidationResult(r *gam.ValidationResult) string {
 
 func init() {
 	validateCmd.Flags().Bool("all", false, "Validate entire project")
+	validateCmd.Flags().Bool("arch", false, "Validate arch.md alignment only (no database required)")
 }

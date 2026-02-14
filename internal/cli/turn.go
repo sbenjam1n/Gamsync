@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/sbenjam1n/gamsync/internal/memorizer"
+	"github.com/sbenjam1n/gamsync/internal/region"
+	"github.com/sbenjam1n/gamsync/internal/validator"
 	"github.com/spf13/cobra"
 )
 
@@ -16,12 +18,13 @@ var turnCmd = &cobra.Command{
 
 var turnStartCmd = &cobra.Command{
 	Use:   "start",
-	Short: "Start a new turn: generate ID, create branch, load scratchpad, compile context",
+	Short: "Start a new turn: generate ID, search pertinent memory, compile context",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		regionPath, _ := cmd.Flags().GetString("region")
 		if regionPath == "" {
 			return fmt.Errorf("--region is required")
 		}
+		prompt, _ := cmd.Flags().GetString("prompt")
 
 		ctx := context.Background()
 		pool, err := connectDB(ctx)
@@ -41,24 +44,109 @@ var turnStartCmd = &cobra.Command{
 			return fmt.Errorf("create turn: %w", err)
 		}
 
-		// Load previous scratchpad for this region
-		var prevScratchpad *string
-		var prevTurnID *string
-		pool.QueryRow(ctx, `
-			SELECT t.scratchpad, t.id
-			FROM turns t
-			JOIN turn_regions tr ON tr.turn_id = t.id
-			JOIN regions r ON r.id = tr.region_id
-			WHERE r.path <@ $1::ltree AND t.scratchpad IS NOT NULL AND t.status = 'COMPLETED'
-			ORDER BY t.completed_at DESC NULLS LAST
-			LIMIT 1
-		`, regionPath).Scan(&prevScratchpad, &prevTurnID)
-
 		fmt.Printf("Turn started: %s\n", turnID)
 		fmt.Printf("Region: %s\n", regionPath)
 
-		if prevScratchpad != nil && *prevScratchpad != "" {
-			fmt.Printf("\n--- Previous Scratchpad [%s] ---\n%s\n---\n", *prevTurnID, *prevScratchpad)
+		// --- Full memory search (3 strategies) ---
+
+		// Strategy 1: Region-scoped scratchpads (ancestors + descendants)
+		regionRows, _ := pool.Query(ctx, `
+			SELECT t.scratchpad, t.id, t.scope_path, t.completed_at
+			FROM turns t
+			JOIN turn_regions tr ON tr.turn_id = t.id
+			JOIN regions r ON r.id = tr.region_id
+			WHERE (r.path <@ $1::ltree OR r.path @> $1::ltree)
+			  AND t.scratchpad IS NOT NULL AND t.status = 'COMPLETED'
+			ORDER BY t.completed_at DESC NULLS LAST
+			LIMIT 10
+		`, regionPath)
+		seenTurns := make(map[string]bool)
+		if regionRows != nil {
+			fmt.Println("\n--- Turn Memory (region-scoped) ---")
+			for regionRows.Next() {
+				var sp, tid, scopePath string
+				var completedAt *time.Time
+				regionRows.Scan(&sp, &tid, &scopePath, &completedAt)
+				seenTurns[tid] = true
+				ts := ""
+				if completedAt != nil {
+					ts = completedAt.Format("2006-01-02 15:04")
+				}
+				fmt.Printf("[%s] scope=%s %s\n%s\n\n", tid, scopePath, ts, sp)
+			}
+			regionRows.Close()
+		}
+
+		// Strategy 2: Concept-scoped scratchpads
+		conceptRows, _ := pool.Query(ctx, `
+			SELECT DISTINCT t.scratchpad, t.id, t.scope_path, t.completed_at
+			FROM turns t
+			JOIN turn_regions tr ON tr.turn_id = t.id
+			JOIN regions r ON r.id = tr.region_id
+			JOIN concept_region_assignments cra ON cra.region_id = r.id
+			JOIN concepts c ON c.id = cra.concept_id
+			WHERE c.id IN (
+				SELECT c2.id FROM regions r2
+				JOIN concept_region_assignments cra2 ON cra2.region_id = r2.id
+				JOIN concepts c2 ON c2.id = cra2.concept_id
+				WHERE r2.path @> $1::ltree OR r2.path = $1::ltree
+			)
+			AND t.scratchpad IS NOT NULL AND t.status = 'COMPLETED'
+			ORDER BY t.completed_at DESC NULLS LAST
+			LIMIT 10
+		`, regionPath)
+		if conceptRows != nil {
+			first := true
+			for conceptRows.Next() {
+				var sp, tid, scopePath string
+				var completedAt *time.Time
+				conceptRows.Scan(&sp, &tid, &scopePath, &completedAt)
+				if seenTurns[tid] {
+					continue
+				}
+				if first {
+					fmt.Println("--- Turn Memory (concept-scoped) ---")
+					first = false
+				}
+				seenTurns[tid] = true
+				ts := ""
+				if completedAt != nil {
+					ts = completedAt.Format("2006-01-02 15:04")
+				}
+				fmt.Printf("[%s] scope=%s %s\n%s\n\n", tid, scopePath, ts, sp)
+			}
+			conceptRows.Close()
+		}
+
+		// Strategy 3: Prompt-relevance search (if prompt provided)
+		if prompt != "" {
+			simRows, _ := pool.Query(ctx, `
+				SELECT t.id, t.scope_path, t.scratchpad, t.completed_at,
+				       similarity(t.scratchpad, $1) AS sim
+				FROM turns t
+				WHERE t.scratchpad IS NOT NULL AND t.scratchpad % $1
+				ORDER BY sim DESC
+				LIMIT 5
+			`, prompt)
+			if simRows != nil {
+				first := true
+				for simRows.Next() {
+					var tid, scope, sp string
+					var completedAt *time.Time
+					var sim float64
+					simRows.Scan(&tid, &scope, &sp, &completedAt, &sim)
+					if seenTurns[tid] || sim < 0.1 {
+						continue
+					}
+					if first {
+						fmt.Println("--- Turn Memory (prompt-relevant) ---")
+						first = false
+					}
+					seenTurns[tid] = true
+					fmt.Printf("[%s] scope=%s (relevance=%.0f%%)\n%s\n\n", tid, scope, sim*100, sp)
+				}
+				simRows.Close()
+			}
 		}
 
 		// Show concept assignments
@@ -70,7 +158,7 @@ var turnStartCmd = &cobra.Command{
 			WHERE r.path @> $1::ltree OR r.path = $1::ltree
 		`, regionPath)
 		if rows != nil {
-			fmt.Println("\nConcepts in scope:")
+			fmt.Println("Concepts in scope:")
 			for rows.Next() {
 				var name, purpose, role string
 				rows.Scan(&name, &purpose, &role)
@@ -85,12 +173,13 @@ var turnStartCmd = &cobra.Command{
 
 var turnEndCmd = &cobra.Command{
 	Use:   "end",
-	Short: "End a turn: validate, save memory, generate tree, queue proposals",
+	Short: "End a turn: validate (blocks on failure), save memory, queue proposals",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		scratchpad, _ := cmd.Flags().GetString("scratchpad")
 		if scratchpad == "" {
 			return fmt.Errorf("--scratchpad is required")
 		}
+		skipValidation, _ := cmd.Flags().GetBool("skip-validation")
 
 		ctx := context.Background()
 		pool, err := connectDB(ctx)
@@ -100,12 +189,69 @@ var turnEndCmd = &cobra.Command{
 		defer pool.Close()
 
 		// Find the most recent active turn
-		var turnID string
+		var turnID, scopePath string
 		err = pool.QueryRow(ctx, `
-			SELECT id FROM turns WHERE status = 'ACTIVE' ORDER BY created_at DESC LIMIT 1
-		`).Scan(&turnID)
+			SELECT id, scope_path FROM turns WHERE status = 'ACTIVE' ORDER BY created_at DESC LIMIT 1
+		`).Scan(&turnID, &scopePath)
 		if err != nil {
 			return fmt.Errorf("no active turn found: %w", err)
+		}
+
+		// --- Validation gate: blocks turn end on failure ---
+		if !skipValidation {
+			fmt.Printf("Validating turn %s (scope: %s)...\n", turnID, scopePath)
+
+			v := validator.New(pool, projectRoot())
+
+			// Check 1: arch.md namespace alignment
+			archIssues := v.ValidateArchAlignment(ctx, projectRoot())
+			if len(archIssues) > 0 {
+				fmt.Println("\nVALIDATION FAILED: arch.md alignment issues")
+				for _, issue := range archIssues {
+					fmt.Printf("  %s\n", issue)
+				}
+				fmt.Println("\nTurn end blocked. Fix the issues above and retry.")
+				fmt.Println("Use --skip-validation to bypass (not recommended).")
+				return fmt.Errorf("validation failed: %d arch.md alignment issues", len(archIssues))
+			}
+
+			// Check 2: Region markers in source code
+			gamignore := region.ParseGamignore(projectRoot())
+			markers, warnings, _ := region.ScanDirectory(projectRoot(), gamignore)
+
+			if len(warnings) > 0 {
+				fmt.Println("\nVALIDATION FAILED: region marker issues")
+				for _, w := range warnings {
+					fmt.Printf("  %s\n", w)
+				}
+				fmt.Println("\nTurn end blocked. Fix region marker issues above.")
+				return fmt.Errorf("validation failed: %d region marker warnings", len(warnings))
+			}
+
+			// Check 3: Source regions match arch.md
+			archPaths, _ := region.ParseArchMd(projectRoot())
+			archSet := make(map[string]bool)
+			for _, p := range archPaths {
+				archSet[p] = true
+			}
+
+			var unregistered []string
+			for _, m := range markers {
+				if !archSet[m.Path] {
+					unregistered = append(unregistered, m.Path)
+				}
+			}
+
+			if len(unregistered) > 0 {
+				fmt.Println("\nVALIDATION FAILED: source regions not in arch.md")
+				for _, p := range unregistered {
+					fmt.Printf("  %s (found in source, missing from arch.md)\n", p)
+				}
+				fmt.Println("\nAdd these to arch.md or remove the region markers.")
+				return fmt.Errorf("validation failed: %d unregistered regions", len(unregistered))
+			}
+
+			fmt.Println("  Validation passed.")
 		}
 
 		now := time.Now()
@@ -304,9 +450,11 @@ var turnDiffCmd = &cobra.Command{
 func init() {
 	turnStartCmd.Flags().String("region", "", "Target region path")
 	turnStartCmd.MarkFlagRequired("region")
+	turnStartCmd.Flags().String("prompt", "", "Task description for relevance-based memory search")
 
 	turnEndCmd.Flags().String("scratchpad", "", "What you did and what's next")
 	turnEndCmd.MarkFlagRequired("scratchpad")
+	turnEndCmd.Flags().Bool("skip-validation", false, "Skip validation gate (not recommended)")
 
 	turnCmd.AddCommand(turnStartCmd)
 	turnCmd.AddCommand(turnEndCmd)

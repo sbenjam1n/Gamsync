@@ -271,7 +271,7 @@ func (m *Memorizer) CreateTurn(ctx context.Context, regionPath, prompt string) (
 		return "", err
 	}
 
-	contextRef, err := m.CompileContext(ctx, regionPath)
+	contextRef, err := m.CompileContext(ctx, regionPath, prompt)
 	if err != nil {
 		return "", err
 	}
@@ -289,7 +289,8 @@ func (m *Memorizer) CreateTurn(ctx context.Context, regionPath, prompt string) (
 
 // CompileContext extracts concept specs, syncs, plan context, quality grades,
 // and turn memory for a region, implementing progressive disclosure.
-func (m *Memorizer) CompileContext(ctx context.Context, regionPath string) (string, error) {
+// The prompt parameter enables relevance-based memory search across all turns.
+func (m *Memorizer) CompileContext(ctx context.Context, regionPath string, prompt ...string) (string, error) {
 	var parts []string
 
 	parts = append(parts, fmt.Sprintf("# Turn Context: %s\n", regionPath))
@@ -331,25 +332,100 @@ func (m *Memorizer) CompileContext(ctx context.Context, regionPath string) (stri
 		}
 	}
 
-	// Get recent scratchpads
-	rows, _ := m.db.Query(ctx, `
-		SELECT t.scratchpad, t.id, t.completed_at
+	// --- Turn Memory: multi-strategy search ---
+	// Strategy 1: Region-scoped scratchpads (turns that touched this region or ancestors)
+	regionRows, _ := m.db.Query(ctx, `
+		SELECT t.scratchpad, t.id, t.scope_path, t.completed_at
 		FROM turns t
 		JOIN turn_regions tr ON tr.turn_id = t.id
 		JOIN regions r ON r.id = tr.region_id
-		WHERE r.path <@ $1::ltree AND t.scratchpad IS NOT NULL
+		WHERE (r.path <@ $1::ltree OR r.path @> $1::ltree) AND t.scratchpad IS NOT NULL
 		ORDER BY t.completed_at DESC NULLS LAST
-		LIMIT 5
+		LIMIT 10
 	`, regionPath)
-	if rows != nil {
-		parts = append(parts, "\n## Previous Scratchpads\n")
-		for rows.Next() {
+	seenTurns := make(map[string]bool)
+	if regionRows != nil {
+		parts = append(parts, "\n## Turn Memory (region-scoped)\n")
+		for regionRows.Next() {
 			var sp, tid string
+			var scopePath string
 			var completedAt interface{}
-			rows.Scan(&sp, &tid, &completedAt)
-			parts = append(parts, fmt.Sprintf("[%s] %s\n", tid, sp))
+			regionRows.Scan(&sp, &tid, &scopePath, &completedAt)
+			seenTurns[tid] = true
+			parts = append(parts, fmt.Sprintf("[%s] scope=%s\n%s\n\n", tid, scopePath, sp))
 		}
-		rows.Close()
+		regionRows.Close()
+	}
+
+	// Strategy 2: Concept-scoped scratchpads (turns touching regions assigned to the same concepts)
+	if len(concepts) > 0 {
+		conceptNames := make([]string, len(concepts))
+		for i, c := range concepts {
+			conceptNames[i] = c.Name
+		}
+		conceptRows, _ := m.db.Query(ctx, `
+			SELECT DISTINCT t.scratchpad, t.id, t.scope_path, t.completed_at
+			FROM turns t
+			JOIN turn_regions tr ON tr.turn_id = t.id
+			JOIN regions r ON r.id = tr.region_id
+			JOIN concept_region_assignments cra ON cra.region_id = r.id
+			JOIN concepts c ON c.id = cra.concept_id
+			WHERE c.name = ANY($1) AND t.scratchpad IS NOT NULL
+			ORDER BY t.completed_at DESC NULLS LAST
+			LIMIT 10
+		`, conceptNames)
+		if conceptRows != nil {
+			var conceptMemory []string
+			for conceptRows.Next() {
+				var sp, tid string
+				var scopePath string
+				var completedAt interface{}
+				conceptRows.Scan(&sp, &tid, &scopePath, &completedAt)
+				if !seenTurns[tid] {
+					seenTurns[tid] = true
+					conceptMemory = append(conceptMemory, fmt.Sprintf("[%s] scope=%s\n%s\n", tid, scopePath, sp))
+				}
+			}
+			conceptRows.Close()
+			if len(conceptMemory) > 0 {
+				parts = append(parts, "\n## Turn Memory (concept-scoped)\n")
+				for _, m := range conceptMemory {
+					parts = append(parts, m+"\n")
+				}
+			}
+		}
+	}
+
+	// Strategy 3: Prompt-relevance search (similarity search across all scratchpads)
+	if len(prompt) > 0 && prompt[0] != "" {
+		simRows, _ := m.db.Query(ctx, `
+			SELECT t.id, t.scope_path, t.scratchpad, t.completed_at,
+			       similarity(t.scratchpad, $1) AS sim
+			FROM turns t
+			WHERE t.scratchpad IS NOT NULL AND t.scratchpad % $1
+			ORDER BY sim DESC
+			LIMIT 5
+		`, prompt[0])
+		if simRows != nil {
+			var relevantMemory []string
+			for simRows.Next() {
+				var tid, scope, sp string
+				var completedAt interface{}
+				var sim float64
+				simRows.Scan(&tid, &scope, &sp, &completedAt, &sim)
+				if !seenTurns[tid] && sim > 0.1 {
+					seenTurns[tid] = true
+					relevantMemory = append(relevantMemory, fmt.Sprintf("[%s] scope=%s (relevance=%.0f%%)\n%s\n", tid, scope, sim*100, sp))
+				}
+			}
+			simRows.Close()
+			if len(relevantMemory) > 0 {
+				parts = append(parts, "\n## Turn Memory (prompt-relevant)\n")
+				for _, m := range relevantMemory {
+					parts = append(parts, m+"\n")
+				}
+			}
+		}
 	}
 
 	// Get quality grades
@@ -374,6 +450,7 @@ func (m *Memorizer) CompileContext(ctx context.Context, regionPath string) (stri
 	for _, p := range parts {
 		content += p
 	}
+	_ = content // will be written to contextRef in full implementation
 
 	return contextRef, nil
 }

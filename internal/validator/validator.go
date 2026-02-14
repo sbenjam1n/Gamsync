@@ -55,7 +55,7 @@ func (v *Validator) Tier0Structural(ctx context.Context, p *gam.Proposal) *gam.V
 			Passed:   false,
 			Expected: fmt.Sprintf("region %s exists", p.RegionPath),
 			Got:      "not found",
-			Fix:      fmt.Sprintf("Add region to arch.md and run: gam arch sync. Or run: gam region touch %s --file <target_file>", p.RegionPath),
+			Fix:      fmt.Sprintf("Add '%s' to arch.md and add @region:%s / @endregion:%s markers to source code. Then run: gam validate --arch", p.RegionPath, p.RegionPath, p.RegionPath),
 		})
 		return result
 	}
@@ -92,7 +92,7 @@ func (v *Validator) Tier0Structural(ctx context.Context, p *gam.Proposal) *gam.V
 				Passed:   false,
 				Expected: fmt.Sprintf("@region:%s in %s", mr.Path, mr.File),
 				Got:      "missing",
-				Fix:      fmt.Sprintf("Run: gam region touch %s --file %s", mr.Path, mr.File),
+				Fix:      fmt.Sprintf("Add @region:%s / @endregion:%s markers to %s", mr.Path, mr.Path, mr.File),
 			})
 			return result
 		}
@@ -381,6 +381,57 @@ func (v *Validator) validateSyncRefs(ctx context.Context, sync gam.Synchronizati
 	}
 
 	return detail
+}
+
+// ValidateArchAlignment checks that source code region markers align with arch.md
+// and that arch.md namespaces are hierarchically consistent.
+func (v *Validator) ValidateArchAlignment(ctx context.Context, projectRoot string) []string {
+	var issues []string
+
+	// Check 1: arch.md namespace hierarchy consistency (dotwalk validation)
+	nsIssues := region.ValidateArchNamespaces(projectRoot)
+	issues = append(issues, nsIssues...)
+
+	// Check 2: source regions match arch.md
+	archPaths, err := region.ParseArchMd(projectRoot)
+	if err != nil {
+		issues = append(issues, fmt.Sprintf("cannot parse arch.md: %v", err))
+		return issues
+	}
+	archSet := make(map[string]bool)
+	for _, p := range archPaths {
+		archSet[p] = true
+	}
+
+	gamignore := region.ParseGamignore(projectRoot)
+	markers, warnings, _ := region.ScanDirectory(projectRoot, gamignore)
+
+	// Marker warnings are issues
+	issues = append(issues, warnings...)
+
+	// Source regions not in arch.md
+	sourceSet := make(map[string]bool)
+	for _, m := range markers {
+		sourceSet[m.Path] = true
+		if !archSet[m.Path] {
+			issues = append(issues, fmt.Sprintf(
+				"region %s found in source (%s:%d) but not in arch.md — add it to arch.md",
+				m.Path, m.File, m.StartLine,
+			))
+		}
+	}
+
+	// arch.md entries with no source regions (informational warning)
+	for _, p := range archPaths {
+		if !sourceSet[p] {
+			issues = append(issues, fmt.Sprintf(
+				"arch.md declares %s but no source region markers found — either add @region:%s markers to source or remove from arch.md",
+				p, p,
+			))
+		}
+	}
+
+	return issues
 }
 
 func (v *Validator) findSyncRefsForAction(ctx context.Context, actionRef string) ([]string, error) {

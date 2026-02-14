@@ -25,11 +25,11 @@ var initCmd = &cobra.Command{
 		archPath := filepath.Join(root, "arch.md")
 		if _, err := os.Stat(archPath); os.IsNotExist(err) {
 			archContent := `# Architecture
-# Region markers define the namespace tree for this project.
-# Add regions with: gam region touch <path> --file <filepath>
+# Namespace dotwalk — each line is a region path with optional comment.
+# Validation (gam validate --arch) checks that source @region markers match.
+# Indentation is cosmetic. Hierarchy is inferred from the dot path.
 
-# @region:app
-# @endregion:app
+app                          # Root application namespace
 `
 			if err := os.WriteFile(archPath, []byte(archContent), 0644); err != nil {
 				return fmt.Errorf("create arch.md: %w", err)
