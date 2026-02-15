@@ -285,6 +285,108 @@ func TestParseArchMd(t *testing.T) {
 	}
 }
 
+func TestParseArchMdWithDescriptions(t *testing.T) {
+	dir := t.TempDir()
+	content := `# Architecture
+
+# @region:app
+# @region:app.search Search Subsystem
+# @endregion:app.search
+# @region:app.search.sources Source Management
+# @endregion:app.search.sources
+# @region:app.search.sources.btv2 BT v2 Adapter
+# @endregion:app.search.sources.btv2
+# @region:app.billing Billing
+# @endregion:app.billing
+# @endregion:app
+`
+	os.WriteFile(filepath.Join(dir, "arch.md"), []byte(content), 0644)
+
+	paths, err := ParseArchMd(dir)
+	if err != nil {
+		t.Fatalf("ParseArchMd error: %v", err)
+	}
+
+	if len(paths) != 5 {
+		t.Errorf("expected 5 paths, got %d: %v", len(paths), paths)
+	}
+
+	entries, _ := ParseArchMdEntries(dir)
+	found := false
+	for _, e := range entries {
+		if e.Path == "app.search" && e.Description == "Search Subsystem" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected to find app.search with description 'Search Subsystem'")
+	}
+}
+
+func TestIsValidNamespace(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"app", true},
+		{"app.search", true},
+		{"app.search.sources.btv2", true},
+		{"app_core", true},
+		{"", false},
+		{"123", false},
+		{"app..search", false},
+		{".app", false},
+		{"app.", false},
+		{"app search", false},
+	}
+
+	for _, tt := range tests {
+		got := isValidNamespace(tt.input)
+		if got != tt.want {
+			t.Errorf("isValidNamespace(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestValidateArchNamespaces(t *testing.T) {
+	dir := t.TempDir()
+
+	// Valid hierarchy
+	content := `# Architecture
+# @region:app
+# @region:app.search
+# @endregion:app.search
+# @region:app.search.sources
+# @endregion:app.search.sources
+# @region:app.billing
+# @endregion:app.billing
+# @endregion:app
+`
+	os.WriteFile(filepath.Join(dir, "arch.md"), []byte(content), 0644)
+
+	issues := ValidateArchNamespaces(dir)
+	if len(issues) != 0 {
+		t.Errorf("expected no issues, got: %v", issues)
+	}
+
+	// Missing parent — app.search.sources without app.search
+	content2 := `# Architecture
+# @region:app
+# @region:app.search.sources
+# @endregion:app.search.sources
+# @endregion:app
+`
+	os.WriteFile(filepath.Join(dir, "arch.md"), []byte(content2), 0644)
+
+	issues2 := ValidateArchNamespaces(dir)
+	if len(issues2) != 1 {
+		t.Errorf("expected 1 issue (missing parent), got %d: %v", len(issues2), issues2)
+	}
+	if len(issues2) > 0 && !strings.Contains(issues2[0], "no parent") {
+		t.Errorf("expected 'no parent' message, got: %s", issues2[0])
+	}
+}
+
 func TestParseGamignore(t *testing.T) {
 	dir := t.TempDir()
 	content := `# Comment

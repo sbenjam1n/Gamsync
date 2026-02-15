@@ -3,6 +3,8 @@ package memorizer
 import (
 	"context"
 	"fmt"
+
+	"github.com/sbenjam1n/gamsync/internal/region"
 )
 
 // GardenFinding represents an entropy issue discovered by the gardener.
@@ -84,13 +86,18 @@ func (m *Memorizer) findStaleTodos(ctx context.Context) ([]GardenFinding, error)
 func (m *Memorizer) findOrphanedRegions(ctx context.Context) ([]GardenFinding, error) {
 	var findings []GardenFinding
 
-	// Find regions in DB with no code
+	// Scan source code for actual region markers
+	gamignore := region.ParseGamignore(m.projectRoot)
+	sourceMarkers, _, _ := region.ScanDirectory(m.projectRoot, gamignore)
+	sourceRegions := make(map[string]bool)
+	for _, mk := range sourceMarkers {
+		sourceRegions[mk.Path] = true
+	}
+
+	// Find DB regions with no source code markers
 	rows, err := m.db.Query(ctx, `
 		SELECT r.path FROM regions r
-		WHERE NOT EXISTS (
-			SELECT 1 FROM turn_regions tr WHERE tr.region_id = r.id
-		)
-		AND r.lifecycle_state != 'deprecated'
+		WHERE r.lifecycle_state != 'deprecated'
 	`)
 	if err != nil {
 		return nil, err
@@ -100,12 +107,14 @@ func (m *Memorizer) findOrphanedRegions(ctx context.Context) ([]GardenFinding, e
 	for rows.Next() {
 		var path string
 		rows.Scan(&path)
-		findings = append(findings, GardenFinding{
-			RegionPath:  path,
-			Category:    "orphaned_region",
-			Description: fmt.Sprintf("Region %s exists in DB but has never been touched by any turn. Consider removing from arch.md or implementing.", path),
-			Mechanical:  false,
-		})
+		if !sourceRegions[path] {
+			findings = append(findings, GardenFinding{
+				RegionPath:  path,
+				Category:    "orphaned_region",
+				Description: fmt.Sprintf("Region %s exists in database but has no @region markers in source code. Either add source markers or remove from arch.md and database.", path),
+				Mechanical:  false,
+			})
+		}
 	}
 	return findings, nil
 }

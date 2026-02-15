@@ -1,0 +1,26 @@
+# .gamignore
+# Glob patterns for paths that Tier 0 skips when checking "code exists outside region boundaries"
+
+# Vendored dependencies
+vendor/
+
+# Generated code
+gen/
+*.pb.go
+*_sqlc.go
+
+# Configuration
+*.yaml
+*.toml
+*.env*
+
+# Build artifacts
+bin/
+dist/
+
+# Shared utilities that cross concept boundaries
+pkg/util/
+pkg/middleware/
+
+# Test fixtures
+testdata/

@@ -377,8 +377,36 @@ func isIgnored(relPath string, patterns []string) bool {
 	return false
 }
 
+// ArchEntry represents a namespace entry in arch.md with its description.
+type ArchEntry struct {
+	Path        string
+	Description string
+	Line        int
+}
+
 // ParseArchMd extracts region paths from an arch.md file.
+// arch.md uses @region/@endregion markers with dotwalked namespace paths
+// and optional one-line descriptions:
+//
+//	# @region:app.search.sources Search Source Implementations
+//	# @endregion:app.search.sources
 func ParseArchMd(projectRoot string) ([]string, error) {
+	entries, err := ParseArchMdEntries(projectRoot)
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, len(entries))
+	for i, e := range entries {
+		paths[i] = e.Path
+	}
+	return paths, nil
+}
+
+// ParseArchMdEntries extracts namespace entries with descriptions from arch.md.
+// arch.md is @region/@endregion markers forming a namespace tree with
+// one-line descriptions. The namespace path is a dotwalked identifier
+// (e.g., app.search.sources.btv2).
+func ParseArchMdEntries(projectRoot string) ([]ArchEntry, error) {
 	archPath := filepath.Join(projectRoot, "arch.md")
 	data, err := os.ReadFile(archPath)
 	if err != nil {
@@ -388,14 +416,103 @@ func ParseArchMd(projectRoot string) ([]string, error) {
 		return nil, err
 	}
 
-	var paths []string
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if path, ok := extractRegionPath(line, "region"); ok {
-			paths = append(paths, path)
+	var entries []ArchEntry
+	seen := make(map[string]bool)
+
+	for lineNum, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+
+		// Extract @region paths (skip @endregion — same paths, no new info)
+		if path, ok := extractRegionPath(trimmed, "region"); ok {
+			if !seen[path] {
+				seen[path] = true
+				// Extract description: everything after the path on the same line
+				desc := extractArchDescription(trimmed, path)
+				entries = append(entries, ArchEntry{
+					Path:        path,
+					Description: desc,
+					Line:        lineNum + 1,
+				})
+			}
 		}
 	}
-	return paths, nil
+	return entries, nil
+}
+
+// extractArchDescription extracts the one-line description after the region path.
+// e.g., "# @region:app.search.sources Search Source Implementations" → "Search Source Implementations"
+func extractArchDescription(line, path string) string {
+	marker := "@region:" + path
+	idx := strings.Index(line, marker)
+	if idx == -1 {
+		return ""
+	}
+	rest := line[idx+len(marker):]
+	// Trim comment closers and whitespace
+	rest = strings.TrimRight(rest, " \t")
+	rest = strings.TrimSuffix(rest, "-->")
+	rest = strings.TrimSuffix(rest, "*/")
+	rest = strings.TrimSpace(rest)
+	return rest
+}
+
+// isValidNamespace checks if a string is a valid dot-separated namespace path.
+func isValidNamespace(s string) bool {
+	if s == "" {
+		return false
+	}
+	segments := strings.Split(s, ".")
+	for _, seg := range segments {
+		if seg == "" {
+			return false
+		}
+		for i, c := range seg {
+			if i == 0 {
+				if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
+					return false
+				}
+			} else {
+				if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+// ValidateArchNamespaces checks that arch.md namespace paths are hierarchically
+// consistent (every child has an ancestor path defined).
+func ValidateArchNamespaces(projectRoot string) []string {
+	entries, err := ParseArchMdEntries(projectRoot)
+	if err != nil {
+		return []string{fmt.Sprintf("cannot read arch.md: %v", err)}
+	}
+
+	pathSet := make(map[string]bool)
+	for _, e := range entries {
+		pathSet[e.Path] = true
+	}
+
+	var issues []string
+	for _, e := range entries {
+		segments := strings.Split(e.Path, ".")
+		if len(segments) <= 1 {
+			continue
+		}
+		// Check that parent exists
+		parent := strings.Join(segments[:len(segments)-1], ".")
+		if !pathSet[parent] {
+			issues = append(issues, fmt.Sprintf(
+				"arch.md:%d: namespace %s has no parent %s defined",
+				e.Line, e.Path, parent,
+			))
+		}
+	}
+	return issues
 }
 
 // FindUnregionedCode finds source files with code not inside any region markers.

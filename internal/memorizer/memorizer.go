@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"github.com/sbenjam1n/gamsync/internal/gam"
@@ -17,19 +19,21 @@ import (
 
 // Memorizer is the auditor agent that validates proposals and manages turns.
 type Memorizer struct {
-	db        *pgxpool.Pool
-	rdb       *redis.Client
-	queue     *queue.Queue
-	validator *validator.Validator
+	db          *pgxpool.Pool
+	rdb         *redis.Client
+	queue       *queue.Queue
+	validator   *validator.Validator
+	projectRoot string
 }
 
 // New creates a new Memorizer.
 func New(db *pgxpool.Pool, rdb *redis.Client, projectRoot string) *Memorizer {
 	return &Memorizer{
-		db:        db,
-		rdb:       rdb,
-		queue:     queue.New(rdb),
-		validator: validator.New(db, projectRoot),
+		db:          db,
+		rdb:         rdb,
+		queue:       queue.New(rdb),
+		validator:   validator.New(db, projectRoot),
+		projectRoot: projectRoot,
 	}
 }
 
@@ -103,12 +107,18 @@ func (m *Memorizer) getProposal(ctx context.Context, id string) (*gam.Proposal, 
 		return nil, fmt.Errorf("fetch proposal %s: %w", id, err)
 	}
 
-	json.Unmarshal(evidenceJSON, &p.Evidence)
+	if err := json.Unmarshal(evidenceJSON, &p.Evidence); err != nil {
+		return nil, fmt.Errorf("unmarshal evidence for proposal %s: %w", id, err)
+	}
 	if syncChangesJSON != nil {
-		json.Unmarshal(syncChangesJSON, &p.SyncChanges)
+		if err := json.Unmarshal(syncChangesJSON, &p.SyncChanges); err != nil {
+			return nil, fmt.Errorf("unmarshal sync_changes for proposal %s: %w", id, err)
+		}
 	}
 	if deferredJSON != nil {
-		json.Unmarshal(deferredJSON, &p.DeferredActions)
+		if err := json.Unmarshal(deferredJSON, &p.DeferredActions); err != nil {
+			return nil, fmt.Errorf("unmarshal deferred_actions for proposal %s: %w", id, err)
+		}
 	}
 
 	return &p, nil
@@ -156,26 +166,26 @@ func (m *Memorizer) approveProposal(ctx context.Context, id string, p *gam.Propo
 		`, p.ProposedState, p.RegionPath)
 	}
 
-	// Insert sync changes if any
+	// Insert sync changes if any — all within the transaction
 	if p.SyncChanges != nil {
-		for _, sync := range p.SyncChanges.Added {
-			m.insertSync(ctx, sync)
+		for _, sc := range p.SyncChanges.Added {
+			m.insertSyncTx(ctx, tx, sc)
 		}
-		for _, sync := range p.SyncChanges.Modified {
-			m.updateSync(ctx, sync)
+		for _, sc := range p.SyncChanges.Modified {
+			m.updateSyncTx(ctx, tx, sc)
 		}
 		for _, name := range p.SyncChanges.Deleted {
 			tx.Exec(ctx, "DELETE FROM synchronizations WHERE name = $1", name)
 		}
 	}
 
-	// Queue deferred actions as new tasks
-	for _, deferred := range p.DeferredActions {
-		m.queueTask(ctx, deferred.TargetRegion, deferred.TaskType, deferred.Reason)
-	}
-
 	if err := tx.Commit(ctx); err != nil {
 		return err
+	}
+
+	// Post-commit: queue deferred actions via Redis (outside tx)
+	for _, deferred := range p.DeferredActions {
+		m.queueTask(ctx, deferred.TargetRegion, deferred.TaskType, deferred.Reason)
 	}
 
 	// Update execution plan progress if turn belongs to one
@@ -190,65 +200,63 @@ func (m *Memorizer) approveProposal(ctx context.Context, id string, p *gam.Propo
 	return nil
 }
 
-func (m *Memorizer) insertSync(ctx context.Context, sync gam.Synchronization) {
-	whenJSON, _ := json.Marshal(sync.WhenClause)
-	whereJSON, _ := json.Marshal(sync.WhereClause)
-	thenJSON, _ := json.Marshal(sync.ThenClause)
+func (m *Memorizer) insertSyncTx(ctx context.Context, tx pgx.Tx, sc gam.Synchronization) {
+	whenJSON, _ := json.Marshal(sc.WhenClause)
+	whereJSON, _ := json.Marshal(sc.WhereClause)
+	thenJSON, _ := json.Marshal(sc.ThenClause)
 
-	m.db.Exec(ctx, `
+	tx.Exec(ctx, `
 		INSERT INTO synchronizations (name, when_clause, where_clause, then_clause, description, enabled)
 		VALUES ($1, $2, $3, $4, $5, $6)
-	`, sync.Name, whenJSON, whereJSON, thenJSON, sync.Description, true)
+	`, sc.Name, whenJSON, whereJSON, thenJSON, sc.Description, true)
 
-	// Build sync_refs index
-	m.buildSyncRefs(ctx, sync)
+	m.buildSyncRefsTx(ctx, tx, sc)
 }
 
-func (m *Memorizer) updateSync(ctx context.Context, sync gam.Synchronization) {
-	whenJSON, _ := json.Marshal(sync.WhenClause)
-	whereJSON, _ := json.Marshal(sync.WhereClause)
-	thenJSON, _ := json.Marshal(sync.ThenClause)
+func (m *Memorizer) updateSyncTx(ctx context.Context, tx pgx.Tx, sc gam.Synchronization) {
+	whenJSON, _ := json.Marshal(sc.WhenClause)
+	whereJSON, _ := json.Marshal(sc.WhereClause)
+	thenJSON, _ := json.Marshal(sc.ThenClause)
 
-	m.db.Exec(ctx, `
+	tx.Exec(ctx, `
 		UPDATE synchronizations
 		SET when_clause = $1, where_clause = $2, then_clause = $3,
 		    description = $4, updated_at = NOW()
 		WHERE name = $5
-	`, whenJSON, whereJSON, thenJSON, sync.Description, sync.Name)
+	`, whenJSON, whereJSON, thenJSON, sc.Description, sc.Name)
 
-	// Rebuild sync_refs index
-	m.db.Exec(ctx, `DELETE FROM sync_refs WHERE sync_id = (SELECT id FROM synchronizations WHERE name = $1)`, sync.Name)
-	m.buildSyncRefs(ctx, sync)
+	tx.Exec(ctx, `DELETE FROM sync_refs WHERE sync_id = (SELECT id FROM synchronizations WHERE name = $1)`, sc.Name)
+	m.buildSyncRefsTx(ctx, tx, sc)
 }
 
-func (m *Memorizer) buildSyncRefs(ctx context.Context, sync gam.Synchronization) {
+func (m *Memorizer) buildSyncRefsTx(ctx context.Context, tx pgx.Tx, sc gam.Synchronization) {
 	var syncID string
-	m.db.QueryRow(ctx, "SELECT id FROM synchronizations WHERE name = $1", sync.Name).Scan(&syncID)
+	tx.QueryRow(ctx, "SELECT id FROM synchronizations WHERE name = $1", sc.Name).Scan(&syncID)
 	if syncID == "" {
 		return
 	}
 
-	for _, w := range sync.WhenClause {
-		m.db.Exec(ctx, `
+	for _, w := range sc.WhenClause {
+		tx.Exec(ctx, `
 			INSERT INTO sync_refs (sync_id, concept_name, action_name, clause_type)
 			VALUES ($1, $2, $3, 'when')
 			ON CONFLICT DO NOTHING
 		`, syncID, w.Concept, w.Action)
 	}
 
-	for _, t := range sync.ThenClause {
-		m.db.Exec(ctx, `
+	for _, t := range sc.ThenClause {
+		tx.Exec(ctx, `
 			INSERT INTO sync_refs (sync_id, concept_name, action_name, clause_type)
 			VALUES ($1, $2, $3, 'then')
 			ON CONFLICT DO NOTHING
 		`, syncID, t.Concept, t.Action)
 	}
 
-	for _, w := range sync.WhereClause {
+	for _, w := range sc.WhereClause {
 		for _, patternVal := range w.Pattern {
 			if fields, ok := patternVal.(map[string]any); ok {
 				for fieldName := range fields {
-					m.db.Exec(ctx, `
+					tx.Exec(ctx, `
 						INSERT INTO sync_refs (sync_id, concept_name, state_field, clause_type)
 						VALUES ($1, $2, $3, 'where')
 						ON CONFLICT DO NOTHING
@@ -271,7 +279,7 @@ func (m *Memorizer) CreateTurn(ctx context.Context, regionPath, prompt string) (
 		return "", err
 	}
 
-	contextRef, err := m.CompileContext(ctx, regionPath)
+	contextRef, err := m.CompileContext(ctx, regionPath, prompt)
 	if err != nil {
 		return "", err
 	}
@@ -289,7 +297,8 @@ func (m *Memorizer) CreateTurn(ctx context.Context, regionPath, prompt string) (
 
 // CompileContext extracts concept specs, syncs, plan context, quality grades,
 // and turn memory for a region, implementing progressive disclosure.
-func (m *Memorizer) CompileContext(ctx context.Context, regionPath string) (string, error) {
+// The prompt parameter enables relevance-based memory search across all turns.
+func (m *Memorizer) CompileContext(ctx context.Context, regionPath string, prompt ...string) (string, error) {
 	var parts []string
 
 	parts = append(parts, fmt.Sprintf("# Turn Context: %s\n", regionPath))
@@ -331,25 +340,100 @@ func (m *Memorizer) CompileContext(ctx context.Context, regionPath string) (stri
 		}
 	}
 
-	// Get recent scratchpads
-	rows, _ := m.db.Query(ctx, `
-		SELECT t.scratchpad, t.id, t.completed_at
+	// --- Turn Memory: multi-strategy search ---
+	// Strategy 1: Region-scoped scratchpads (turns that touched this region or ancestors)
+	regionRows, _ := m.db.Query(ctx, `
+		SELECT t.scratchpad, t.id, t.scope_path, t.completed_at
 		FROM turns t
 		JOIN turn_regions tr ON tr.turn_id = t.id
 		JOIN regions r ON r.id = tr.region_id
-		WHERE r.path <@ $1::ltree AND t.scratchpad IS NOT NULL
+		WHERE (r.path <@ $1::ltree OR r.path @> $1::ltree) AND t.scratchpad IS NOT NULL
 		ORDER BY t.completed_at DESC NULLS LAST
-		LIMIT 5
+		LIMIT 10
 	`, regionPath)
-	if rows != nil {
-		parts = append(parts, "\n## Previous Scratchpads\n")
-		for rows.Next() {
+	seenTurns := make(map[string]bool)
+	if regionRows != nil {
+		parts = append(parts, "\n## Turn Memory (region-scoped)\n")
+		for regionRows.Next() {
 			var sp, tid string
+			var scopePath string
 			var completedAt interface{}
-			rows.Scan(&sp, &tid, &completedAt)
-			parts = append(parts, fmt.Sprintf("[%s] %s\n", tid, sp))
+			regionRows.Scan(&sp, &tid, &scopePath, &completedAt)
+			seenTurns[tid] = true
+			parts = append(parts, fmt.Sprintf("[%s] scope=%s\n%s\n\n", tid, scopePath, sp))
 		}
-		rows.Close()
+		regionRows.Close()
+	}
+
+	// Strategy 2: Concept-scoped scratchpads (turns touching regions assigned to the same concepts)
+	if len(concepts) > 0 {
+		conceptNames := make([]string, len(concepts))
+		for i, c := range concepts {
+			conceptNames[i] = c.Name
+		}
+		conceptRows, _ := m.db.Query(ctx, `
+			SELECT DISTINCT t.scratchpad, t.id, t.scope_path, t.completed_at
+			FROM turns t
+			JOIN turn_regions tr ON tr.turn_id = t.id
+			JOIN regions r ON r.id = tr.region_id
+			JOIN concept_region_assignments cra ON cra.region_id = r.id
+			JOIN concepts c ON c.id = cra.concept_id
+			WHERE c.name = ANY($1) AND t.scratchpad IS NOT NULL
+			ORDER BY t.completed_at DESC NULLS LAST
+			LIMIT 10
+		`, conceptNames)
+		if conceptRows != nil {
+			var conceptMemory []string
+			for conceptRows.Next() {
+				var sp, tid string
+				var scopePath string
+				var completedAt interface{}
+				conceptRows.Scan(&sp, &tid, &scopePath, &completedAt)
+				if !seenTurns[tid] {
+					seenTurns[tid] = true
+					conceptMemory = append(conceptMemory, fmt.Sprintf("[%s] scope=%s\n%s\n", tid, scopePath, sp))
+				}
+			}
+			conceptRows.Close()
+			if len(conceptMemory) > 0 {
+				parts = append(parts, "\n## Turn Memory (concept-scoped)\n")
+				for _, m := range conceptMemory {
+					parts = append(parts, m+"\n")
+				}
+			}
+		}
+	}
+
+	// Strategy 3: Prompt-relevance search (similarity search across all scratchpads)
+	if len(prompt) > 0 && prompt[0] != "" {
+		simRows, _ := m.db.Query(ctx, `
+			SELECT t.id, t.scope_path, t.scratchpad, t.completed_at,
+			       similarity(t.scratchpad, $1) AS sim
+			FROM turns t
+			WHERE t.scratchpad IS NOT NULL AND t.scratchpad % $1
+			ORDER BY sim DESC
+			LIMIT 5
+		`, prompt[0])
+		if simRows != nil {
+			var relevantMemory []string
+			for simRows.Next() {
+				var tid, scope, sp string
+				var completedAt interface{}
+				var sim float64
+				simRows.Scan(&tid, &scope, &sp, &completedAt, &sim)
+				if !seenTurns[tid] && sim > 0.1 {
+					seenTurns[tid] = true
+					relevantMemory = append(relevantMemory, fmt.Sprintf("[%s] scope=%s (relevance=%.0f%%)\n%s\n", tid, scope, sim*100, sp))
+				}
+			}
+			simRows.Close()
+			if len(relevantMemory) > 0 {
+				parts = append(parts, "\n## Turn Memory (prompt-relevant)\n")
+				for _, m := range relevantMemory {
+					parts = append(parts, m+"\n")
+				}
+			}
+		}
 	}
 
 	// Get quality grades
@@ -373,6 +457,9 @@ func (m *Memorizer) CompileContext(ctx context.Context, regionPath string) (stri
 	content := ""
 	for _, p := range parts {
 		content += p
+	}
+	if err := os.WriteFile(contextRef, []byte(content), 0644); err != nil {
+		return "", fmt.Errorf("write context file: %w", err)
 	}
 
 	return contextRef, nil
