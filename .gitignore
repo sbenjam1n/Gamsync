@@ -1,0 +1,6 @@
+# Build artifacts
+gam
+telomere/*.pd_linux
+telomere/*.pd_darwin
+telomere/*.o
+telomere/transforms/*.o
